@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import torch.optim as optim
 from trl.core import LengthSampler
+import os
 
 # Set the device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -102,6 +103,8 @@ def train_trpo(config):
 
     # Build dataset and dataloader
     dataset = build_dataset(config)
+    # Reduce the dataset
+    dataset = dataset.select(range(100))
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=lambda x: collator(x, tokenizer))
 
     # Optimizer
@@ -177,14 +180,23 @@ def train_trpo(config):
             optimizer.step()
 
             print(f"Loss: {loss.item()}, KL-divergence: {kl.item()}")
+    
+    # Save the model and tokenizer
+    save_directory = "trpo_model"  
+    os.makedirs(save_directory, exist_ok=True)
+    model.save_pretrained(save_directory)
+    tokenizer.save_pretrained(save_directory)
+    print(f"Model and tokenizer saved to {save_directory}")
+
 
 
 if __name__ == "__main__":
     from trl import PPOConfig
-
+    import wandb
+    wandb.init()
     config = PPOConfig(
         model_name="distilgpt2",
         learning_rate=1.41e-5,
-        log_with=None,  # Replace with "wandb" if using logging
+        log_with="wandb",  # Replace with "wandb" if using logging
     )
     train_trpo(config)
