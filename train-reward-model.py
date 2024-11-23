@@ -2,17 +2,14 @@ from datasets import load_dataset
 import os
 import torch
 import torch.nn as nn
+import wandb
+
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 
 from transformers import (
     GPT2Tokenizer,
-    GPT2LMHeadModel,
-    AutoModelForSequenceClassification,
-    AutoTokenizer,
-    Trainer,
-    TrainingArguments,
-    DataCollatorForLanguageModeling,
+    GPT2LMHeadModel
 )
 
 from transformers import GPT2Tokenizer
@@ -28,15 +25,16 @@ from tqdm import tqdm
 
 device = 'cuda'
 print(f'Using device: {device}')
-ds = load_dataset("Anthropic/hh-rlhf")
-
+ds = load_dataset("ajaykarthick/imdb-movie-reviews")
+base_model = 'lvwerra/gpt2-imdb'
 
 from torch.utils.data import Dataset
-tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
-
+tokenizer = GPT2Tokenizer.from_pretrained(base_model)
+tokenizer.add_special_tokens({'pad_token': '[PAD]'})
 
 class RLHFDataset(Dataset):
     def __init__(self, dataset, tokenizer, max_length=256):
+        # print(dataset, ' is the dataset', dataset[0])
         self.tokenizer = tokenizer
         self.max_length = max_length
 
@@ -44,15 +42,12 @@ class RLHFDataset(Dataset):
         self.scores = []
 
         for example in dataset:
-            # Preferred response
-            chosen_text = example['chosen']
+            chosen_text = example['review']
             self.texts.append(chosen_text)
-            self.scores.append(1.0)  # High reward
-
-            # Less preferred response
-            rejected_text = example['rejected']
-            self.texts.append(rejected_text)
-            self.scores.append(0.0)  # Low reward
+            if example['label'] == 1:
+                self.scores.append(1.0)
+            else:
+                self.scores.append(0.0)
 
     def __len__(self):
         return len(self.texts)
@@ -98,9 +93,10 @@ train_dataset, val_dataset = random_split(rlhf_dataset, [train_length, val_lengt
 
 # Create DataLoaders
 from torch.utils.data import DataLoader
+batch_size = 8
 
-train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=16)
+train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size)
 
 
 
@@ -108,7 +104,7 @@ import torch.nn as nn
 from transformers import GPT2LMHeadModel
 
 class GPT2RewardModel(nn.Module):
-    def __init__(self, model_name='gpt2', tokenizer=None):
+    def __init__(self, model_name, tokenizer=None):
         super(GPT2RewardModel, self).__init__()
         self.gpt2 = GPT2LMHeadModel.from_pretrained(model_name)
 
@@ -131,14 +127,14 @@ class GPT2RewardModel(nn.Module):
         return reward
 
 # Initialize the model with the new tokenizer
-reward_model = GPT2RewardModel(tokenizer=tokenizer).to(device)
+reward_model = GPT2RewardModel(tokenizer=tokenizer, model_name=base_model).to(device)
 
 optimizer = optim.AdamW(reward_model.parameters(), lr=1e-2)
 loss_fn = nn.MSELoss()
 
 from tqdm.auto import tqdm
 
-def train_reward_model(model, train_loader, val_loader, optimizer, loss_fn, epochs=2):
+def train_reward_model(model, train_loader, val_loader, optimizer, loss_fn, epochs):
     for epoch in range(epochs):
         model.train()
         total_loss = 0
@@ -157,6 +153,9 @@ def train_reward_model(model, train_loader, val_loader, optimizer, loss_fn, epoc
             total_loss += loss.item()
             progress_bar.set_postfix(loss=total_loss / (progress_bar.n + 1))
 
+            # Log training loss to wandb
+            wandb.log({"train_loss": loss.item()})
+
         # Validation
         model.eval()
         val_loss = 0
@@ -172,11 +171,27 @@ def train_reward_model(model, train_loader, val_loader, optimizer, loss_fn, epoc
         val_loss /= len(val_loader)
         print(f'Validation Loss: {val_loss}')
 
+        # Log validation loss to wandb
+        wandb.log({"val_loss": val_loss, "epoch": epoch + 1})
+
+wandb.init(
+    project="rlhf-reward-model",  # Replace with your project name
+    config={
+        "learning_rate": 1e-2,
+        "batch_size": batch_size,
+        "epochs": 5,
+        "model_name": "gpt2",
+    }
+)
+
 # Train the reward model
-train_reward_model(reward_model, train_loader, val_loader, optimizer, loss_fn, epochs=5)
+train_reward_model(reward_model, train_loader, val_loader, optimizer, loss_fn, epochs=1)
 
 # Save the trained reward model   
-torch.save(reward_model.state_dict(), './reward_model_medium.pth')
+torch.save(reward_model.state_dict(), './reward-model-imdb-dataset.pth')
 
 #reward_model.save_pretrained('./reward_model')
-tokenizer.save_pretrained('./reward_model_medium')
+tokenizer.save_pretrained('./reward-model-imdb-dataset')
+
+wandb.finish()
+

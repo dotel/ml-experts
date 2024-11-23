@@ -1,57 +1,52 @@
 import torch
-import numpy as np
-from transformers import PreTrainedTokenizerFast
-from sb3_contrib import TRPO
-import os
-from transformers import GPT2Tokenizer, GPT2LMHeadModel
+from transformers import AutoTokenizer, GPT2LMHeadModel
+
+# Set the device
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f'Using device: {device}')
+
+# Load the saved model and tokenizer
+save_directory = "saved_model_trpo"  # Path where the model and tokenizer are saved
+model = GPT2LMHeadModel.from_pretrained(save_directory).to(device)
+tokenizer = AutoTokenizer.from_pretrained(save_directory)
+
+# Ensure the tokenizer has a padding token
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+
+# Function to generate output from the model
+def generate_response(prompt, max_length=50):
+    # Tokenize the input text
+    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+
+    # Generate output
+    with torch.no_grad():
+        generated_outputs = model.generate(
+            input_ids=input_ids,
+            max_length=max_length,
+            num_return_sequences=1,
+            do_sample=True,
+            top_k=50,
+            top_p=0.95,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+
+    # Decode the generated text
+    generated_text = tokenizer.decode(generated_outputs[0], skip_special_tokens=True)
+    return generated_text
 
 
-# Load the trained RL model
-model_path = "gpt2_trpo_model"  # Path to the saved model
-rl_model = TRPO.load(model_path)
-
-# Load the tokenizer
-tokenizer = GPT2Tokenizer.from_pretrained('./reward_model-2-epoc')
-
-# Define device
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Move the model's policy to evaluation mode and the correct device
-policy_model = rl_model.policy
-policy_model.eval()
-policy_model.to(device)
-
-# Prompts to evaluate
-prompts = [
+if __name__ == "__main__":
+    # Example input prompt
+    prompt = "Once upon a time in a faraway land"
+    prompts = [
     "The movie was incredibly",
     "I didn't enjoy this film because",
     "One of the most outstanding aspects of the movie was",
-    "I hated this movie. This is the worst movie",
-]
-
-# Generate responses
-max_length = 50  # Maximum number of tokens to generate
-
-for prompt in prompts:
-    # Tokenize the initial prompt
-    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
-    generated_tokens = input_ids[0].tolist()  # Initialize with prompt tokens
-
-    for _ in range(max_length - len(input_ids[0])):  # Limit the sequence length
-        # Create the observation for the policy
-        obs = torch.tensor([generated_tokens[-10:]], dtype=torch.int32).to(device)  # Use the last `max_length` tokens
-        with torch.no_grad():
-            action = policy_model._predict(obs)  # Predict next token
-        
-        # Append the predicted token to the generated sequence
-        generated_tokens.append(action.item())
-
-        # Stop generation if EOS token is produced
-        if action.item() == tokenizer.eos_token_id:
-            break
-
-    # Decode the generated sequence to text
-    response = tokenizer.decode(generated_tokens, skip_special_tokens=True)
-    print(f"Prompt: {prompt}")
-    print(f"Response: {response}")
-    print("=" * 50)
+    "I hated this movie. This is the worst movie"
+    ]
+    for prompt in prompts:
+        response = generate_response(prompt)
+        print(f"Input: {prompt}")
+        print(f"Generated Response: {response}")
+        print('-' * 50)
