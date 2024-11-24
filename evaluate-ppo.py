@@ -2,7 +2,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # Load the fine-tuned model and tokenizer
-model_name = "gpt2-imdb-pos-2"  # Replace with the directory where your model is saved
+model_name = "ppo-trained-model"  # Replace with the directory where your model is saved
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForCausalLM.from_pretrained(model_name)
 
@@ -23,13 +23,13 @@ prompts = [
 
 # Generate responses
 response_generation_kwargs = {
-    "max_length": 50,  # Adjust this to control the length of the output
-    "min_length": 10,
-    "do_sample": True,  # Sampling allows more diverse outputs
-    "top_k": 50,        # Top-k sampling for diversity
-    "top_p": 0.95,      # Nucleus sampling for diversity
-    "temperature": 0.7, # Controls randomness
-    "pad_token_id": tokenizer.eos_token_id,  # Avoid generation errors
+    "max_length": 50,
+    "min_length": 30,
+    "do_sample": True,
+    "top_k": 50,
+    "top_p": 0.9,  # Enable nucleus sampling
+    "temperature": 0.7,  # Increase temperature for more diversity
+    "pad_token_id": tokenizer.eos_token_id,
 }
 
 for prompt in prompts:

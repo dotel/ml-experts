@@ -98,15 +98,6 @@ def build_dataset(config, dataset_name="imdb", input_min_text_length=2, input_ma
 
 def collator(data):
     return dict((key, [d[key] for d in data]) for key in data[0])
-# skipped_batches = 0
-
-# def count_skipped_batches(message, category, filename, lineno, file=None, line=None):
-#     global skipped_batches
-#     if "Skipping batch" in str(message):
-#         skipped_batches += 1
-#     return warnings.formatwarning(message, category, filename, lineno, line)
-
-# warnings.showwarning = count_skipped_batches
 
 if __name__ == '__main__':
     config = PPOConfig(

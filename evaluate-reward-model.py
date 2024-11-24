@@ -73,7 +73,8 @@ prompts = [
     "The acting was terrible.",
     "The plot was confusing and poorly executed.",
     "I am neutral about this movie.",
-    "OK movie, not bad."
+    "OK movie, not bad.", 
+    "I have never seen it. I have never seen it. I have never seen it. I have never seen it. I have never seen it."
 ]
 # Evaluate the prompt
 for prompt in prompts:
