@@ -140,7 +140,7 @@ if __name__ == '__main__':
 
         print("*"*50)
         query_tensors = batch["input_ids"]
-
+        
         #### Phase 1: Get trajectories from the offline policy
         response_tensors = []
         for query in query_tensors:
@@ -151,6 +151,7 @@ if __name__ == '__main__':
         batch["response"] = [tokenizer.decode(r.squeeze()) for r in response_tensors]
 
         #### Phase 1: Compute rewards
+        
         texts = [q + r for q, r in zip(batch["query"], batch["response"])]
         rewards = compute_rewards_custom(texts)  # Returns a list of scalars
 

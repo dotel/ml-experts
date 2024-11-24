@@ -8,13 +8,80 @@ from torch.utils.data import DataLoader
 import torch.optim as optim
 from trl.core import LengthSampler
 import os
+from transformers import GPT2Tokenizer, GPT2LMHeadModel
+
 
 # Set the device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f'Using device: {device}')
+base_model = 'lvwerra/gpt2-imdb'
+
+
+class GPT2RewardModel(nn.Module):
+    def __init__(self, model_name, tokenizer=None):
+        super(GPT2RewardModel, self).__init__()
+        self.gpt2 = GPT2LMHeadModel.from_pretrained(model_name)
+
+        # Resize the token embeddings
+        if tokenizer is not None:
+            self.gpt2.resize_token_embeddings(len(tokenizer))
+
+        self.dropout = nn.Dropout(0.1)
+        self.regression_head = nn.Linear(self.gpt2.config.n_embd, 1)
+        nn.init.xavier_uniform_(self.regression_head.weight)
+        nn.init.zeros_(self.regression_head.bias)
+
+    def forward(self, input_ids, attention_mask=None, apply_sigmoid=False):
+        transformer_outputs = self.gpt2.transformer(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+        )
+        hidden_states = transformer_outputs.last_hidden_state
+        pooled_output = torch.mean(hidden_states, dim=1)  # Average pooling
+        pooled_output = self.dropout(pooled_output)
+        logits = self.regression_head(pooled_output).squeeze(-1)
+        
+        if apply_sigmoid:
+            return torch.sigmoid(logits)  # Normalize to [0, 1] for inference
+        return logits  # Raw logits for training
+reward_tokenizer = GPT2Tokenizer.from_pretrained('./reward-model-imdb-dataset')
+
+
+# Load the trained reward model
+reward_model = GPT2RewardModel(model_name=base_model, tokenizer=reward_tokenizer).to(device)
+reward_model.load_state_dict(torch.load('./reward-model-imdb-dataset/reward-model-imdb-dataset.pth', map_location=device))
+reward_model.eval()
+
+# Load the tokenizer
+
+def compute_rewards_custom(texts):
+    """
+    Compute rewards using the trained reward model.
+    """
+    reward_model.eval()
+    rewards = []
+    with torch.no_grad():
+        for text in texts:
+            inputs = reward_tokenizer(
+                text,
+                truncation=True,
+                max_length=256,
+                padding='max_length',
+                return_tensors='pt',
+            ).to(device)
+
+
+            # Forward pass through the reward model
+            outputs = reward_model(inputs['input_ids'], attention_mask=inputs['attention_mask'], apply_sigmoid=True)
+            reward = outputs.item()  # Extract the scalar reward
+            rewards.append(reward)
+
+
+    return rewards  # Return a list of scalar rewards
+
 
 # Dataset preparation
-def build_dataset(config, dataset_name="imdb", input_min_text_length=2, input_max_text_length=8):
+def build_dataset(config, dataset_name="imdb", input_min_text_length=16, input_max_text_length=64):
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)
     tokenizer.pad_token = tokenizer.eos_token
     ds = load_dataset(dataset_name, split="train")
@@ -74,6 +141,28 @@ def compute_kl_divergence(logits_old, logits_new, attention_mask):
     # Apply attention mask to calculate mean KL-divergence
     return (kl.sum(dim=-1) * attention_mask).mean()
 
+# Define the Actor-Critic Model
+class GPT2ActorCriticModel(nn.Module):
+    def __init__(self, model_name='gpt2'):
+        super(GPT2ActorCriticModel, self).__init__()
+        self.gpt2 = GPT2LMHeadModel.from_pretrained(model_name)
+        self.value_head = nn.Linear(self.gpt2.config.n_embd, 1)
+
+
+    def forward(self, input_ids, attention_mask=None):
+        outputs = self.gpt2(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            return_dict=True,
+            output_hidden_states=True,
+        )
+        hidden_states = outputs.hidden_states[-1]  # Use the last hidden state
+        logits = outputs.logits
+
+
+        # Compute value estimates
+        values = self.value_head(hidden_states).squeeze(-1)
+        return logits, values
 
 
 
@@ -85,6 +174,7 @@ def compute_advantages(rewards):
 # TRPO surrogate loss
 def surrogate_loss(log_probs_old, log_probs_new, advantages):
     ratios = torch.exp(log_probs_new - log_probs_old)
+    print(f"Ratios: {ratios.shape}, Advantages: {advantages}")
     return -(ratios * advantages).mean()
 
 
@@ -93,12 +183,12 @@ def train_trpo(config):
     # Configurations
     model_name = config.model_name
     batch_size = 1
-    num_epochs = 1
-    kl_threshold = 0.4  # Trust region threshold
+    num_epochs = 200
+    kl_threshold = 0.5  # Trust region threshold
 
     # Load model and tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = GPT2LMHeadModel.from_pretrained(model_name).to(device)
+    model = GPT2ActorCriticModel(model_name=model_name).to(device)
     model.train()
 
     # Build dataset and dataloader
@@ -112,16 +202,17 @@ def train_trpo(config):
 
     for epoch in range(num_epochs):
         print(f"Epoch {epoch + 1}/{num_epochs}")
+        
         for batch in tqdm(dataloader):
             input_ids = batch['input_ids']
             attention_mask = batch['attention_mask']
             queries = batch['queries']
 
             with torch.no_grad():
-                logits_old = model(input_ids=input_ids).logits
+                logits_old, values_old = model(input_ids=input_ids)
 
             # Generate responses
-            generated_outputs = model.generate(
+            generated_outputs = model.gpt2.generate(
                 input_ids=input_ids,
                 max_length=input_ids.shape[1] + 20,
                 do_sample=True,
@@ -132,7 +223,8 @@ def train_trpo(config):
             response_ids = generated_outputs[:, input_ids.shape[1]:]
 
             # Compute new logits
-            logits_new = model(input_ids=generated_outputs).logits
+            logits_new, values = model(input_ids=generated_outputs)
+
 
            # Compute log probabilities
             response_log_probs_old = F.log_softmax(logits_old, dim=-1)
@@ -153,8 +245,14 @@ def train_trpo(config):
 
             # Compute rewards and advantages
             responses = [tokenizer.decode(ids) for ids in response_ids]
-            rewards = compute_rewards(queries, responses)
-            advantages = compute_advantages(rewards)
+            texts = [q + r for q, r in zip(queries, responses)]
+            rewards = compute_rewards_custom(texts)  # Returns a list of scalars
+
+            # returns = rewards  # For simplicity, consider immediate rewards
+            returns = torch.tensor(rewards, dtype=torch.float32, device=values.device)
+
+            advantages = returns - values[:, -1].detach()
+
 
             # Compute surrogate loss
             loss = surrogate_loss(response_log_probs_old, response_log_probs_new, advantages)
@@ -180,11 +278,17 @@ def train_trpo(config):
             optimizer.step()
 
             print(f"Loss: {loss.item()}, KL-divergence: {kl.item()}")
+            wandb.log({
+                "epoch": epoch + 1,
+                "loss": loss.item(),
+                "kl_divergence": kl.item(),
+                # "mean_reward": rewards.mean().item(),
+            })
     
     # Save the model and tokenizer
     save_directory = "trpo_model"  
     os.makedirs(save_directory, exist_ok=True)
-    model.save_pretrained(save_directory)
+    model.gpt2.save_pretrained(save_directory)
     tokenizer.save_pretrained(save_directory)
     print(f"Model and tokenizer saved to {save_directory}")
 
@@ -193,10 +297,14 @@ def train_trpo(config):
 if __name__ == "__main__":
     from trl import PPOConfig
     import wandb
-    wandb.init()
     config = PPOConfig(
         model_name="distilgpt2",
         learning_rate=1.41e-5,
         log_with="wandb",  # Replace with "wandb" if using logging
     )
+    wandb.init(project="TRPO_Training", config=config.__dict__)
+    
+    
     train_trpo(config)
+
+    wandb.finish()
