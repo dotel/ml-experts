@@ -9,36 +9,49 @@ from trl import PPOTrainer, PPOConfig, AutoModelForCausalLMWithValueHead
 from trl.core import LengthSampler
 from transformers import GPT2Tokenizer, GPT2LMHeadModel
 import torch.nn as nn
+import warnings
 
 # device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
 device = 'cuda'  # Use CPU for this example
 print(f'Using device: {device}')
+base_model = 'lvwerra/gpt2-imdb'
 
 class GPT2RewardModel(nn.Module):
-    def __init__(self, model_name='gpt2'):
+    def __init__(self, model_name, tokenizer=None):
         super(GPT2RewardModel, self).__init__()
         self.gpt2 = GPT2LMHeadModel.from_pretrained(model_name)
+
+        # Resize the token embeddings
+        if tokenizer is not None:
+            self.gpt2.resize_token_embeddings(len(tokenizer))
+
         self.dropout = nn.Dropout(0.1)
         self.regression_head = nn.Linear(self.gpt2.config.n_embd, 1)
+        nn.init.xavier_uniform_(self.regression_head.weight)
+        nn.init.zeros_(self.regression_head.bias)
 
-    def forward(self, input_ids, attention_mask=None):
+    def forward(self, input_ids, attention_mask=None, apply_sigmoid=False):
         transformer_outputs = self.gpt2.transformer(
             input_ids=input_ids,
             attention_mask=attention_mask,
         )
         hidden_states = transformer_outputs.last_hidden_state
-        pooled_output = hidden_states[:, -1, :]  # Use the representation of the last token
+        pooled_output = torch.mean(hidden_states, dim=1)  # Average pooling
         pooled_output = self.dropout(pooled_output)
-        reward = self.regression_head(pooled_output).squeeze(-1)
-        return reward
+        logits = self.regression_head(pooled_output).squeeze(-1)
+        
+        if apply_sigmoid:
+            return torch.sigmoid(logits)  # Normalize to [0, 1] for inference
+        return logits  # Raw logits for training
+reward_tokenizer = GPT2Tokenizer.from_pretrained('./reward-model-imdb-dataset')
+
 
 # Load the trained reward model
-reward_model = GPT2RewardModel().to(device)
-reward_model.load_state_dict(torch.load('./reward_model-2-epoc/reward_model.pth', map_location=device))
+reward_model = GPT2RewardModel(model_name=base_model, tokenizer=reward_tokenizer).to(device)
+reward_model.load_state_dict(torch.load('./reward-model-imdb-dataset/reward-model-imdb-dataset.pth', map_location=device))
 reward_model.eval()
 
 # Load the tokenizer
-reward_tokenizer = GPT2Tokenizer.from_pretrained('./reward_model-2-epoc')
 
 def compute_rewards_custom(texts):
     """
@@ -57,7 +70,7 @@ def compute_rewards_custom(texts):
             ).to(device)
 
             # Forward pass through the reward model
-            outputs = reward_model(inputs['input_ids'], attention_mask=inputs['attention_mask'])
+            outputs = reward_model(inputs['input_ids'], attention_mask=inputs['attention_mask'], apply_sigmoid=True)
             reward = outputs.item()  # Extract the scalar reward
             rewards.append(reward)
 
@@ -68,7 +81,8 @@ def build_dataset(config, dataset_name="imdb", input_min_text_length=2, input_ma
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)
     tokenizer.pad_token = tokenizer.eos_token
     ds = load_dataset(dataset_name, split="train")
-    ds = ds.rename_columns({"text": "review"})
+    # use smaller ds for test
+    ds = ds.rename_column("text", "review")
     ds = ds.filter(lambda x: len(x["review"]) > 200, batched=False)
 
     input_size = LengthSampler(input_min_text_length, input_max_text_length)
@@ -84,6 +98,15 @@ def build_dataset(config, dataset_name="imdb", input_min_text_length=2, input_ma
 
 def collator(data):
     return dict((key, [d[key] for d in data]) for key in data[0])
+# skipped_batches = 0
+
+# def count_skipped_batches(message, category, filename, lineno, file=None, line=None):
+#     global skipped_batches
+#     if "Skipping batch" in str(message):
+#         skipped_batches += 1
+#     return warnings.formatwarning(message, category, filename, lineno, line)
+
+# warnings.showwarning = count_skipped_batches
 
 if __name__ == '__main__':
     config = PPOConfig(
@@ -120,6 +143,7 @@ if __name__ == '__main__':
     }
 
     import time
+    total_batches = len(ppo_trainer.dataloader)
     for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
         start = time.time()
 
@@ -153,6 +177,13 @@ if __name__ == '__main__':
         ppo_trainer.log_stats(stats, batch, rewards)
         end = time.time()
         print(end - start)
+        # print(f"Total skipped batches: {skipped_batches}")
+        # print(f"Total batches: {total_batches}")
 
-    model.save_pretrained("gpt2-imdb-pos-v2", push_to_hub=False)
-    tokenizer.save_pretrained("gpt2-imdb-pos-v2", push_to_hub=False)
+    model.save_pretrained("ppo-trained-model", push_to_hub=False)
+    tokenizer.save_pretrained("ppo-trained-model", push_to_hub=False)
+
+    print("Training finished.")
+    # print(f"Total skipped batches: {skipped_batches}")
+    print(f"Total batches: {total_batches}")
+

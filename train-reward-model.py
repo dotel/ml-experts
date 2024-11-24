@@ -44,7 +44,7 @@ class RLHFDataset(Dataset):
         for example in dataset:
             chosen_text = example['review']
             self.texts.append(chosen_text)
-            if example['label'] == 1:
+            if example['label'] == 0:
                 self.scores.append(1.0)
             else:
                 self.scores.append(0.0)
@@ -76,7 +76,7 @@ from datasets import concatenate_datasets
 full_dataset = concatenate_datasets([ds['train'], ds['test']])
 
 # Use only a subset of the dataset
-subset_size = 1  # Adjust this number based on your resource constraints
+# subset_size = 1000  # Adjust this number based on your resource constraints
 # full_dataset = full_dataset.select(range(subset_size))
 
 # Create the RLHF dataset
@@ -114,23 +114,30 @@ class GPT2RewardModel(nn.Module):
 
         self.dropout = nn.Dropout(0.1)
         self.regression_head = nn.Linear(self.gpt2.config.n_embd, 1)
+        nn.init.xavier_uniform_(self.regression_head.weight)
+        nn.init.zeros_(self.regression_head.bias)
 
-    def forward(self, input_ids, attention_mask=None):
+    def forward(self, input_ids, attention_mask=None, apply_sigmoid=False):
         transformer_outputs = self.gpt2.transformer(
             input_ids=input_ids,
             attention_mask=attention_mask,
         )
         hidden_states = transformer_outputs.last_hidden_state
-        pooled_output = hidden_states[:, -1, :]  # Use the representation of the last token
+        pooled_output = torch.mean(hidden_states, dim=1)  # Average pooling
         pooled_output = self.dropout(pooled_output)
-        reward = self.regression_head(pooled_output).squeeze(-1)
-        return reward
+        logits = self.regression_head(pooled_output).squeeze(-1)
+        
+        if apply_sigmoid:
+            return torch.sigmoid(logits)  # Normalize to [0, 1] for inference
+        return logits  # Raw logits for training
+
 
 # Initialize the model with the new tokenizer
 reward_model = GPT2RewardModel(tokenizer=tokenizer, model_name=base_model).to(device)
 
-optimizer = optim.AdamW(reward_model.parameters(), lr=1e-2)
-loss_fn = nn.MSELoss()
+optimizer = optim.AdamW(reward_model.parameters(), lr=5e-6) #Prev 1e-5 
+loss_fn = nn.BCEWithLogitsLoss()
+
 
 from tqdm.auto import tqdm
 
@@ -138,6 +145,7 @@ def train_reward_model(model, train_loader, val_loader, optimizer, loss_fn, epoc
     for epoch in range(epochs):
         model.train()
         total_loss = 0
+        running_loss = 0  # For smoothing
         progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}')
         for batch in progress_bar:
             optimizer.zero_grad()
@@ -148,17 +156,36 @@ def train_reward_model(model, train_loader, val_loader, optimizer, loss_fn, epoc
             outputs = model(input_ids, attention_mask)
             loss = loss_fn(outputs, scores)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             total_loss += loss.item()
-            progress_bar.set_postfix(loss=total_loss / (progress_bar.n + 1))
+            running_loss += loss.item()  # Smooth loss tracking
+            progress_bar.set_postfix(loss=running_loss / (progress_bar.n + 1))
 
             # Log training loss to wandb
             wandb.log({"train_loss": loss.item()})
 
-        # Validation
-        model.eval()
+            # Evaluate validation loss more frequently
+            if (progress_bar.n + 1) % 500 == 0:  # Every 500 steps
+                val_loss = 0
+                model.eval()
+                with torch.no_grad():
+                    for val_batch in val_loader:
+                        val_input_ids = val_batch['input_ids'].to(device)
+                        val_attention_mask = val_batch['attention_mask'].to(device)
+                        val_scores = val_batch['score'].to(device)
+
+                        val_outputs = model(val_input_ids, val_attention_mask)
+                        val_loss += loss_fn(val_outputs, val_scores).item()
+                val_loss /= len(val_loader)
+                print(f"Step {progress_bar.n + 1}: Validation Loss = {val_loss}")
+                wandb.log({"val_loss_step": val_loss})
+                model.train()  # Return to training mode
+
+        # End of epoch validation
         val_loss = 0
+        model.eval()
         with torch.no_grad():
             for batch in val_loader:
                 input_ids = batch['input_ids'].to(device)
@@ -185,7 +212,7 @@ wandb.init(
 )
 
 # Train the reward model
-train_reward_model(reward_model, train_loader, val_loader, optimizer, loss_fn, epochs=1)
+train_reward_model(reward_model, train_loader, val_loader, optimizer, loss_fn, epochs=3)
 
 # Save the trained reward model   
 torch.save(reward_model.state_dict(), './reward-model-imdb-dataset.pth')
