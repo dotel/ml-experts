@@ -15,6 +15,7 @@ import warnings
 device = 'cuda'  # Use CPU for this example
 print(f'Using device: {device}')
 base_model = 'lvwerra/gpt2-imdb'
+num_epochs = 4
 
 class GPT2RewardModel(nn.Module):
     def __init__(self, model_name, tokenizer=None):
@@ -135,42 +136,44 @@ if __name__ == '__main__':
 
     import time
     total_batches = len(ppo_trainer.dataloader)
-    for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
-        start = time.time()
+    for epoch in range(num_epochs):
+        wandb.log({"epoch": epoch})
+        for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
+            start = time.time()
 
-        print("*"*50)
-        query_tensors = batch["input_ids"]
-        
-        #### Phase 1: Get trajectories from the offline policy
-        response_tensors = []
-        for query in query_tensors:
-            gen_len = output_length_sampler()
-            response_generation_kwargs["max_new_tokens"] = gen_len
-            response = ppo_trainer.generate(query, **response_generation_kwargs)
-            response_tensors.append(response.squeeze()[-gen_len:])
-        batch["response"] = [tokenizer.decode(r.squeeze()) for r in response_tensors]
+            print("*"*50)
+            query_tensors = batch["input_ids"]
+            
+            #### Phase 1: Get trajectories from the offline policy
+            response_tensors = []
+            for query in query_tensors:
+                gen_len = output_length_sampler()
+                response_generation_kwargs["max_new_tokens"] = gen_len
+                response = ppo_trainer.generate(query, **response_generation_kwargs)
+                response_tensors.append(response.squeeze()[-gen_len:])
+            batch["response"] = [tokenizer.decode(r.squeeze()) for r in response_tensors]
 
-        #### Phase 1: Compute rewards
-        
-        texts = [q + r for q, r in zip(batch["query"], batch["response"])]
-        rewards = compute_rewards_custom(texts)  # Returns a list of scalars
+            #### Phase 1: Compute rewards
+            
+            texts = [q + r for q, r in zip(batch["query"], batch["response"])]
+            rewards = compute_rewards_custom(texts)  # Returns a list of scalars
 
-        # Convert rewards to a tensor for normalization
-        rewards_tensor = torch.tensor(rewards, dtype=torch.float).to(device)
+            # Convert rewards to a tensor for normalization
+            rewards_tensor = torch.tensor(rewards, dtype=torch.float).to(device)
 
-        # Normalize rewards between 0 and 1
-        rewards_tensor = (rewards_tensor - rewards_tensor.min()) / (rewards_tensor.max() - rewards_tensor.min() + 1e-8)
+            # Normalize rewards between 0 and 1
+            rewards_tensor = (rewards_tensor - rewards_tensor.min()) / (rewards_tensor.max() - rewards_tensor.min() + 1e-8)
 
-        # Convert normalized rewards back to a list of tensors
-        rewards = [torch.tensor(r, dtype=torch.float).to(device) for r in rewards_tensor.tolist()]
+            # Convert normalized rewards back to a list of tensors
+            rewards = [torch.tensor(r, dtype=torch.float).to(device) for r in rewards_tensor.tolist()]
 
-        #### Phase 1 + Phase 2: calculate the logprobs and then run the PPO update
-        stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
-        ppo_trainer.log_stats(stats, batch, rewards)
-        end = time.time()
-        print(end - start)
-        # print(f"Total skipped batches: {skipped_batches}")
-        # print(f"Total batches: {total_batches}")
+            #### Phase 1 + Phase 2: calculate the logprobs and then run the PPO update
+            stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
+            ppo_trainer.log_stats(stats, batch, rewards)
+            end = time.time()
+            print(end - start)
+            # print(f"Total skipped batches: {skipped_batches}")
+            # print(f"Total batches: {total_batches}")
 
     model.save_pretrained("ppo-trained-model", push_to_hub=False)
     tokenizer.save_pretrained("ppo-trained-model", push_to_hub=False)
@@ -179,3 +182,4 @@ if __name__ == '__main__':
     # print(f"Total skipped batches: {skipped_batches}")
     print(f"Total batches: {total_batches}")
 
+    wandb.finish()

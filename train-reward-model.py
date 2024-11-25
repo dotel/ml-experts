@@ -98,8 +98,6 @@ batch_size = 8
 train_loader = DataLoader(train_dataset, batch_size, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size)
 
-
-
 import torch.nn as nn
 from transformers import GPT2LMHeadModel
 
